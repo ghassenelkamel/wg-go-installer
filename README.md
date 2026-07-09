@@ -284,32 +284,6 @@ Client setup flow:
 5. Choose `2` to connect and run checks.
 6. Choose `3` to disconnect.
 
-## Public Repository Safety
-
-Before publishing:
-
-```bash
-git status --ignored
-```
-
-Make sure these paths are ignored or absent from Git:
-
-```text
-clients/
-clients-full/
-clients-private/
-clients.backup.*/
-client-backups/
-wg-data/
-wg-state/
-wg-client-data/
-wg-go-installer
-wg-client
-.gomodcache/
-```
-
-Never commit generated `.conf` files or JSON state from a real server.
-
 ## Development
 
 Run tests:
