@@ -1,0 +1,44 @@
+services:
+  wg:
+    build: .
+    # No default command: `docker compose run --rm -it wg` opens the menu.
+    # Automation should be explicit: `docker compose run --rm wg up`.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - WG_SKIP_IPTABLES=1     # let the host do NAT/forwarding
+      - WG_CLIENTS_DIR=/clients
+      - WG_CLIENTS_FULL_DIR=/clients-full
+      - WG_CLIENTS_PRIVATE_DIR=/clients-private
+      - WG_CLIENT_BACKUP_DIR=/client-backups
+    volumes:
+      - ./wg-data:/etc/wireguard
+      - ./wg-state:/var/lib/wg-go
+      - ./clients:/clients
+      - ./clients-full:/clients-full
+      - ./clients-private:/clients-private
+      - ./client-backups:/client-backups
+    restart: "no"
+
+  wg-client:
+    profiles:
+      - client
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    stdin_open: true
+    tty: true
+    environment:
+      - WG_CLIENT_CONFIG=/configs/wg0-client-PC_Kagha.conf
+      - WG_CLIENT_LOG=/data/wg-client.log
+    volumes:
+      - ./clients:/configs
+      - ./wg-client-data:/data

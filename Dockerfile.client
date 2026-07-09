@@ -1,0 +1,14 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/wg-client ./cmd/wg-client
+
+FROM alpine:3.20
+RUN apk add --no-cache wireguard-tools iptables ip6tables iproute2 nftables curl bind-tools iputils sudo bash
+COPY --from=build /out/wg-client /usr/local/bin/wg-client
+VOLUME ["/configs"]
+ENV WG_CLIENT_CONFIG=/configs/peer.conf
+ENTRYPOINT ["/usr/local/bin/wg-client"]

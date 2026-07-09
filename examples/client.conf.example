@@ -1,0 +1,11 @@
+[Interface]
+PrivateKey = CLIENT_PRIVATE_KEY_HERE
+Address = 10.66.66.2/32,fd42:42:42::2/128
+DNS = 10.66.66.1
+
+[Peer]
+PublicKey = SERVER_PUBLIC_KEY_HERE
+PresharedKey = CLIENT_PRESHARED_KEY_HERE
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0,::/0
+PersistentKeepalive = 25
