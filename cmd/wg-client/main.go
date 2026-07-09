@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -13,11 +14,13 @@ import (
 )
 
 type clientApp struct {
-	ConfigPath  string
-	IfName      string
-	LogPath     string
-	useResolved bool
-	useNFT      bool
+	ConfigPath        string
+	RuntimeConfigPath string
+	IfName            string
+	LogPath           string
+	useResolved       bool
+	useNFT            bool
+	resolvBackup      string
 }
 
 func main() {
@@ -56,15 +59,17 @@ func newClientApp(cfg string) *clientApp {
 	if cfg == "" {
 		cfg = "/etc/wireguard/peer-laptop.conf"
 	}
-	ifName := strings.TrimSuffix(filepath.Base(cfg), filepath.Ext(cfg))
+	ifName := clientInterfaceName(cfg)
+	runtimeConfig := filepath.Join(clientRuntimeDir(), ifName+".conf")
 	logPath := strings.TrimSpace(os.Getenv("WG_CLIENT_LOG"))
 	if logPath == "" {
 		logPath = filepath.Join(os.Getenv("HOME"), "wg-client.log")
 	}
 	app := &clientApp{
-		ConfigPath: cfg,
-		IfName:     ifName,
-		LogPath:    logPath,
+		ConfigPath:        cfg,
+		RuntimeConfigPath: runtimeConfig,
+		IfName:            ifName,
+		LogPath:           logPath,
 	}
 	if commandExists("resolvectl") {
 		app.useResolved = true
@@ -127,7 +132,6 @@ func (c *clientApp) printMenu() {
 	fmt.Println("│ 5) Kill-switch self-test                           │")
 	fmt.Println("│ 6) Exit                                            │")
 	fmt.Println("└────────────────────────────────────────────────────┘")
-	fmt.Println("This is only for client machines. Server management uses wg-go-installer.")
 }
 
 func (c *clientApp) bringUp() {
@@ -138,6 +142,7 @@ func (c *clientApp) bringUp() {
 	}
 	if err := c.upCore(); err != nil {
 		fmt.Println("Error:", err)
+		c.printConnectHint(err)
 		return
 	}
 	if err := c.ksOn(); err != nil {
@@ -152,7 +157,7 @@ func (c *clientApp) bringDown() {
 	if err := c.ksOff(); err != nil {
 		fmt.Println("Kill-switch error:", err)
 	}
-	_, _ = runCmd("sudo", "wg-quick", "down", c.ConfigPath)
+	_, _ = runCmd("sudo", "wg-quick", "down", c.RuntimeConfigPath)
 }
 
 func (c *clientApp) status() {
@@ -182,7 +187,7 @@ func (c *clientApp) testKillSwitch() {
 		return
 	}
 	fmt.Println("Bringing tunnel down to verify kill-switch blocks traffic...")
-	_, _ = runCmd("sudo", "wg-quick", "down", c.ConfigPath)
+	_, _ = runCmd("sudo", "wg-quick", "down", c.RuntimeConfigPath)
 	if c.checkPublicAccess() {
 		fmt.Println("❌ Kill-switch did not block connections.")
 	} else {
@@ -230,7 +235,8 @@ func (c *clientApp) importConfigInteractive() {
 		return
 	}
 	c.ConfigPath = dest
-	c.IfName = strings.TrimSuffix(filepath.Base(dest), filepath.Ext(dest))
+	c.IfName = clientInterfaceName(dest)
+	c.RuntimeConfigPath = filepath.Join(clientRuntimeDir(), c.IfName+".conf")
 	fmt.Printf("Configuration imported to %s (interface %s)\n", dest, c.IfName)
 }
 
@@ -238,14 +244,84 @@ func (c *clientApp) upCore() error {
 	if err := need("wg-quick"); err != nil {
 		return err
 	}
-	_, _ = runCmd("sudo", "wg-quick", "down", c.ConfigPath)
-	if _, err := runCmd("sudo", "wg-quick", "up", c.ConfigPath); err != nil {
+	if err := c.prepareRuntimeConfig(); err != nil {
 		return err
 	}
+	_, _ = runCmd("sudo", "wg-quick", "down", c.RuntimeConfigPath)
+	if out, err := runCmd("sudo", "wg-quick", "up", c.RuntimeConfigPath); err != nil {
+		if strings.TrimSpace(out) != "" {
+			return fmt.Errorf("wg-quick up failed: %w\n%s", err, out)
+		}
+		return fmt.Errorf("wg-quick up failed: %w", err)
+	}
 	time.Sleep(300 * time.Millisecond)
-	c.dnsBind()
+	if c.dnsManaged() {
+		c.applyManagedDNS()
+	}
 	c.resolveEndpointPreferV6()
 	return nil
+}
+
+func (c *clientApp) prepareRuntimeConfig() error {
+	if err := os.MkdirAll(filepath.Dir(c.RuntimeConfigPath), 0o700); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(c.ConfigPath)
+	if err != nil {
+		return err
+	}
+	data = prepareWGQuickConfig(data, c.dnsManaged())
+	return os.WriteFile(c.RuntimeConfigPath, data, 0o600)
+}
+
+func (c *clientApp) dnsManaged() bool {
+	if v := strings.TrimSpace(os.Getenv("WG_CLIENT_KEEP_DNS")); v == "1" || strings.EqualFold(v, "true") {
+		return false
+	}
+	if v := strings.TrimSpace(os.Getenv("WG_CLIENT_MANAGE_DNS")); v != "" {
+		return v == "1" || strings.EqualFold(v, "true")
+	}
+	return true
+}
+
+func prepareWGQuickConfig(data []byte, stripDNS bool) []byte {
+	if !stripDNS {
+		return data
+	}
+	lines := strings.Split(string(data), "\n")
+	out := make([]string, 0, len(lines)+1)
+	removedDNS := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "DNS") && strings.Contains(trimmed, "=") {
+			removedDNS = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if removedDNS {
+		out = append(out, "# DNS is managed by wg-client via resolvectl or /etc/resolv.conf.")
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
+func (c *clientApp) printConnectHint(err error) {
+	msg := err.Error()
+	if strings.Contains(msg, "src_valid_mark") || strings.Contains(msg, "Read-only file system") {
+		fmt.Println()
+		fmt.Println("Hint: full-tunnel WireGuard needs permission to update host routing/sysctl state.")
+		fmt.Println("If you run the client helper through Docker, rebuild after the latest compose change and use the repo root:")
+		fmt.Println("  docker compose --profile client build wg-client")
+		fmt.Println("  docker compose --profile client run --rm -it -e WG_CLIENT_INTERFACE=wgpc wg-client")
+		fmt.Println("If Docker still makes /proc/sys read-only, run the Go client directly on the host instead:")
+		fmt.Println("  go build -o wg-client ./cmd/wg-client")
+		fmt.Println("  sudo ./wg-client -config clients/wg0-client-PC_Kagha.conf")
+	}
+	if strings.Contains(msg, "resolvconf") || strings.Contains(msg, "could not detect a useable init system") {
+		fmt.Println()
+		fmt.Println("Hint: the helper strips DNS from the temporary wg-quick config by default.")
+		fmt.Println("Rebuild the client image before retrying so wg-quick does not call container resolvconf.")
+	}
 }
 
 func (c *clientApp) handshakeAndChecks() {
@@ -263,24 +339,51 @@ func (c *clientApp) handshakeAndChecks() {
 	fmt.Println("Ping tests via tunnel:")
 	runCmdStream("ping", "-c", "2", "-4", "1.1.1.1")
 	runCmdStream("ping", "-c", "2", "-6", "2606:4700:4700::1111")
+	if _, err := runCmd("ping", "-c", "1", "-6", "2606:4700:4700::1111"); err != nil {
+		fmt.Println()
+		fmt.Println("Note: IPv6 internet was unreachable through the tunnel.")
+		fmt.Println("That is usually a server-side issue: the VPN server needs a global IPv6")
+		fmt.Println("address, a default IPv6 route, and IPv6 masquerade for wg0 egress.")
+		fmt.Println("Check on the server: `ip -6 addr show`, `ip -6 route show default`, and AdGuard/DNS reachability.")
+	}
 }
 
-func (c *clientApp) dnsBind() {
-	if !c.useResolved {
-		return
-	}
+func (c *clientApp) applyManagedDNS() {
 	dnsList := c.cfgDNSList()
 	if len(dnsList) == 0 {
 		return
 	}
-	args := append([]string{"resolvectl", "dns", c.IfName}, dnsList...)
-	_, _ = runCmd("sudo", args...)
-	_, _ = runCmd("sudo", "resolvectl", "domain", c.IfName, "~.")
+	if c.useResolved {
+		args := append([]string{"resolvectl", "dns", c.IfName}, dnsList...)
+		_, _ = runCmd("sudo", args...)
+		_, _ = runCmd("sudo", "resolvectl", "domain", c.IfName, "~.")
+		return
+	}
+	backup := "/etc/resolv.conf.wg-client-backup"
+	if existing, err := os.ReadFile("/etc/resolv.conf"); err == nil {
+		_ = os.WriteFile(backup, existing, 0o644)
+		c.resolvBackup = backup
+	}
+	var sb strings.Builder
+	for _, d := range dnsList {
+		sb.WriteString("nameserver " + d + "\n")
+	}
+	sb.WriteString("options trust-ad\n")
+	if err := os.WriteFile("/etc/resolv.conf", []byte(sb.String()), 0o644); err != nil {
+		fmt.Println("Warning: unable to write /etc/resolv.conf for AdGuard DNS:", err)
+	}
 }
 
 func (c *clientApp) dnsClear() {
 	if c.useResolved {
 		_, _ = runCmd("sudo", "resolvectl", "revert", c.IfName)
+	}
+	if c.resolvBackup != "" {
+		if data, err := os.ReadFile(c.resolvBackup); err == nil {
+			_ = os.WriteFile("/etc/resolv.conf", data, 0o644)
+		}
+		_ = os.Remove(c.resolvBackup)
+		c.resolvBackup = ""
 	}
 }
 
@@ -517,6 +620,54 @@ func copyFile(src, dest string) error {
 		return err
 	}
 	return os.WriteFile(dest, data, 0o600)
+}
+
+func clientInterfaceName(configPath string) string {
+	if override := strings.TrimSpace(os.Getenv("WG_CLIENT_INTERFACE")); override != "" {
+		return truncateInterfaceName(sanitizeInterfaceName(override))
+	}
+	base := strings.TrimSuffix(filepath.Base(configPath), filepath.Ext(configPath))
+	base = sanitizeInterfaceName(base)
+	if len(base) <= 15 {
+		return base
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(configPath))
+	return fmt.Sprintf("wg%x", h.Sum32())
+}
+
+func sanitizeInterfaceName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "wgclient"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "wgclient"
+	}
+	return b.String()
+}
+
+func truncateInterfaceName(name string) string {
+	if len(name) <= 15 {
+		return name
+	}
+	return name[:15]
+}
+
+func clientRuntimeDir() string {
+	if dir := strings.TrimSpace(os.Getenv("WG_CLIENT_RUNTIME_DIR")); dir != "" {
+		return dir
+	}
+	if _, err := os.Stat("/data"); err == nil {
+		return "/data"
+	}
+	return os.TempDir()
 }
 
 func abbreviatePath(path string, max int) string {

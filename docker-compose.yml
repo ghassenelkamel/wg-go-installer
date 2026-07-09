@@ -30,6 +30,8 @@ services:
       context: .
       dockerfile: Dockerfile.client
     network_mode: host
+    # Full-tunnel client mode changes host routes/rules and may need sysctl writes.
+    privileged: true
     cap_add:
       - NET_ADMIN
     devices:

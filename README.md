@@ -254,6 +254,19 @@ Run the client helper menu:
 docker compose --profile client run --rm -it wg-client
 ```
 
+For a stable, short Linux interface name:
+
+```bash
+docker compose --profile client run --rm -it -e WG_CLIENT_INTERFACE=wgpc wg-client
+```
+
+The Docker client runs with elevated network privileges because full-tunnel mode changes host routes, policy rules, firewall state, and WireGuard interfaces. If Docker on your system still blocks `/proc/sys` writes, run the Go client directly on the host instead:
+
+```bash
+go build -o wg-client ./cmd/wg-client
+sudo ./wg-client -config clients/wg0-client-PC_Kagha.conf
+```
+
 Equivalent shortcut:
 
 ```bash
