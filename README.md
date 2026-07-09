@@ -4,20 +4,6 @@ Docker-friendly WireGuard server manager and Linux client helper written in Go.
 
 This project is designed for a small personal VPN server where clients are managed from an interactive menu or CLI, generated configs are stored on the server, and optional AdGuard Home DNS can be used through the VPN address. No Bash scripts are required for normal usage.
 
-## GitHub About
-
-Use this for the repository About field:
-
-```text
-Docker-friendly WireGuard server manager and Linux client helper with interactive menus, QR export, full-tunnel profiles, DNS/AdGuard support, and safe public-repo defaults.
-```
-
-Suggested topics:
-
-```text
-wireguard vpn golang docker docker-compose linux networking adguard qr-code self-hosted
-```
-
 ## What Do I Run?
 
 On the VPN server/VPS, use `wg-go-installer`:
